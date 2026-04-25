@@ -1,17 +1,25 @@
 package com.knowledge.base.service;
 
 import com.knowledge.base.dto.DocumentDTO;
+import com.knowledge.base.dto.OperationDTO;
+import com.knowledge.base.dto.OperationResultDTO;
 import com.knowledge.base.entity.*;
+import com.knowledge.base.ot.DocumentStateManager;
+import com.knowledge.base.ot.Operation;
+import com.knowledge.base.ot.OperationTransformer;
 import com.knowledge.base.repository.*;
 import com.knowledge.base.security.UserPrincipal;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class DocumentService {
@@ -21,6 +29,8 @@ public class DocumentService {
     private final SpaceRepository spaceRepository;
     private final SpaceMemberRepository spaceMemberRepository;
     private final TagRepository tagRepository;
+    private final DocumentStateManager documentStateManager;
+    private final SearchService searchService;
 
     @Transactional
     public Document createDocument(DocumentDTO.CreateRequest request, UserPrincipal currentUser) {
@@ -50,7 +60,10 @@ public class DocumentService {
         document.setCurrentVersion(version);
         document.setVersion(version.getVersion());
 
-        return documentRepository.save(document);
+        Document savedDoc = documentRepository.save(document);
+        
+        log.info("Document {} created, index will be updated by listener", savedDoc.getId());
+        return savedDoc;
     }
 
     @Transactional
@@ -81,7 +94,10 @@ public class DocumentService {
         document.setCurrentVersion(version);
         document.setVersion(version.getVersion());
 
-        return documentRepository.save(document);
+        Document savedDoc = documentRepository.save(document);
+        
+        log.info("Document {} updated, index will be updated by listener", documentId);
+        return savedDoc;
     }
 
     @Transactional
@@ -119,7 +135,9 @@ public class DocumentService {
             document.setVersion(version.getVersion());
         }
 
-        return documentRepository.save(document);
+        Document savedDoc = documentRepository.save(document);
+        log.info("Document {} draft restored, index will be updated by listener", documentId);
+        return savedDoc;
     }
 
     @Transactional
@@ -136,6 +154,8 @@ public class DocumentService {
         document.setDeletedBy(currentUser.getUser());
 
         documentRepository.save(document);
+        
+        log.info("Document {} moved to trash, index will be updated by listener", documentId);
     }
 
     @Transactional
@@ -152,6 +172,8 @@ public class DocumentService {
         document.setDeletedBy(null);
 
         documentRepository.save(document);
+        
+        log.info("Document {} restored from trash, index will be updated by listener", documentId);
     }
 
     @Transactional
@@ -164,6 +186,8 @@ public class DocumentService {
         }
 
         documentRepository.delete(document);
+        
+        log.info("Document {} permanently deleted, index will be updated by listener", documentId);
     }
 
     @Transactional
@@ -187,7 +211,11 @@ public class DocumentService {
         document.setCurrentVersion(newVersion);
         document.setVersion(newVersion.getVersion());
 
-        return documentRepository.save(document);
+        Document savedDoc = documentRepository.save(document);
+        
+        log.info("Document {} rolled back to version {}, index will be updated by listener", 
+            documentId, targetVersion);
+        return savedDoc;
     }
 
     @Transactional
@@ -238,7 +266,21 @@ public class DocumentService {
         return documentRepository.findBySpaceAndIsDeletedTrueOrderByDeletedAtDesc(space);
     }
 
+    @Transactional(readOnly = true)
     public List<Document> searchDocuments(Space space, String keyword) {
+        if (searchService.isIndexAvailable()) {
+            log.debug("Using Hibernate Search for keyword: '{}' in space: {}", keyword, space.getId());
+            List<Document> results = searchService.searchByKeyword(space, keyword);
+            
+            if (!results.isEmpty()) {
+                log.debug("Hibernate Search returned {} results for '{}'", results.size(), keyword);
+                return results;
+            }
+            
+            log.debug("Hibernate Search returned empty results, falling back to JPA query");
+        }
+
+        log.debug("Using JPA fallback search for keyword: '{}' in space: {}", keyword, space.getId());
         return documentRepository.searchByKeyword(space, keyword);
     }
 
@@ -283,5 +325,120 @@ public class DocumentService {
             return true;
         }
         return spaceMemberRepository.existsBySpaceAndUser(space, user);
+    }
+
+    @Transactional
+    public OperationResultDTO applyOperations(
+            Long documentId,
+            List<OperationDTO> operationDTOs,
+            Integer fromVersion,
+            UserPrincipal currentUser) {
+        
+        Document document = documentRepository.findByIdAndIsDeletedFalse(documentId)
+                .orElseThrow(() -> new IllegalArgumentException("Document not found"));
+
+        if (!hasEditPermission(document.getSpace(), currentUser.getUser())) {
+            throw new SecurityException("No permission to edit document");
+        }
+
+        int currentVersion = document.getVersion() != null ? document.getVersion() : 1;
+        
+        if (!documentStateManager.hasDocumentState(documentId)) {
+            documentStateManager.initializeDocument(
+                documentId, 
+                document.getContent(), 
+                currentVersion
+            );
+        }
+
+        List<Operation> operations = operationDTOs.stream()
+                .map(OperationDTO::toOperation)
+                .collect(Collectors.toList());
+
+        log.info("Applying {} operations from version {} to document {}", 
+            operations.size(), fromVersion, documentId);
+
+        DocumentStateManager.OperationResult result = documentStateManager.applyOperations(
+            documentId,
+            operations,
+            fromVersion,
+            currentUser.getId().toString()
+        );
+
+        if (!result.isSuccess()) {
+            return OperationResultDTO.builder()
+                .success(false)
+                .errorMessage(result.getErrorMessage())
+                .build();
+        }
+
+        String newContent = result.getNewContent();
+        int newVersion = result.getNewVersion();
+
+        if (newVersion > currentVersion) {
+            document.setContent(newContent);
+            document.setUpdatedBy(currentUser.getUser());
+            
+            String changeNote = String.format(
+                "OT update: %d operation(s) applied from version %d", 
+                operations.size(), fromVersion
+            );
+            DocumentVersion version = createVersion(document, currentUser.getUser(), changeNote);
+            document.setCurrentVersion(version);
+            document.setVersion(newVersion);
+            
+            documentRepository.save(document);
+            
+            log.info("Document {} updated from version {} to {} via OT, index will be updated", 
+                documentId, currentVersion, newVersion);
+        }
+
+        List<OperationDTO> transformedOps = result.getTransformedOps().stream()
+            .map(OperationDTO::from)
+            .collect(Collectors.toList());
+
+        return OperationResultDTO.builder()
+            .success(true)
+            .newVersion(newVersion)
+            .newContent(newContent)
+            .transformedOperations(transformedOps)
+            .build();
+    }
+
+    public List<OperationDTO> diffContent(String oldContent, String newContent) {
+        List<Operation> operations = OperationTransformer.diff(oldContent, newContent);
+        return operations.stream()
+            .map(OperationDTO::from)
+            .collect(Collectors.toList());
+    }
+
+    public String applyOperationsToContent(String content, List<OperationDTO> operationDTOs) {
+        List<Operation> operations = operationDTOs.stream()
+            .map(OperationDTO::toOperation)
+            .collect(Collectors.toList());
+        
+        return OperationTransformer.apply(operations, content);
+    }
+
+    public void initializeDocumentState(Long documentId, String content, Integer version) {
+        documentStateManager.initializeDocument(documentId, content, version);
+        log.info("Initialized document state for documentId: {}, version: {}", documentId, version);
+    }
+
+    public void updateDocumentState(Long documentId, String content, Integer version) {
+        documentStateManager.updateDocumentState(documentId, content, version);
+        log.info("Updated document state for documentId: {}, version: {}", documentId, version);
+    }
+
+    public void clearDocumentState(Long documentId) {
+        documentStateManager.clearDocumentState(documentId);
+    }
+
+    public Integer getDocumentStateVersion(Long documentId) {
+        return documentStateManager.getCurrentVersion(documentId);
+    }
+
+    public String getDocumentStateContent(Long documentId) {
+        return documentStateManager.getCurrentContent(documentId);
     }
 }
