@@ -97,4 +97,13 @@ export const shareApi = {
   access: (data) => api.post('/api/shares/access', data)
 }
 
+export const operationApi = {
+  applyOperations: (data) => api.post('/api/operations/apply', data),
+  computeDiff: (oldContent, newContent) => api.post('/api/operations/diff', { oldContent, newContent }),
+  applyToContent: (content, operations) => api.post('/api/operations/apply-to-content', { content, operations }),
+  initializeState: (documentId, content, version) => api.post(`/api/operations/document/${documentId}/initialize`, { content, version }),
+  getState: (documentId) => api.get(`/api/operations/document/${documentId}/state`),
+  clearState: (documentId) => api.delete(`/api/operations/document/${documentId}/state`)
+}
+
 export default api
