@@ -1,0 +1,30 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: knowledge-base
+
+  datasource:
+    url: jdbc:mysql://localhost:3306/knowledge_base?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    username: root
+    password: password
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+        dialect: org.hibernate.dialect.MySQLDialect
+
+jwt:
+  secret: knowledge-base-jwt-secret-key-must-be-at-least-256-bits-long-for-security
+  expiration: 86400000
+
+logging:
+  level:
+    com.knowledge.base: DEBUG
+    org.hibernate.SQL: DEBUG
