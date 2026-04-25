@@ -4,6 +4,7 @@ import jakarta.persistence.*;
 import lombok.Data;
 import org.hibernate.search.mapper.pojo.mapping.definition.annotation.FullTextField;
 import org.hibernate.search.mapper.pojo.mapping.definition.annotation.Indexed;
+import org.hibernate.search.mapper.pojo.mapping.definition.annotation.GenericField;
 
 import java.time.LocalDateTime;
 import java.util.HashSet;
@@ -11,18 +12,19 @@ import java.util.Set;
 
 @Data
 @Entity
-@Indexed
+@Indexed(index = "documents")
 @Table(name = "documents")
+@EntityListeners(com.knowledge.base.listener.DocumentIndexListener.class)
 public class Document {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @FullTextField
+    @FullTextField(analyzer = "standard", searchAnalyzer = "standard")
     @Column(nullable = false)
     private String title;
 
-    @FullTextField
+    @FullTextField(analyzer = "standard", searchAnalyzer = "standard")
     @Column(columnDefinition = "TEXT")
     private String content;
 
@@ -44,6 +46,10 @@ public class Document {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "space_id", nullable = false)
     private Space space;
+
+    @GenericField
+    @Column(name = "space_id", insertable = false, updatable = false)
+    private Long spaceId;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "created_by")
@@ -71,6 +77,11 @@ public class Document {
     @Column(nullable = false)
     private Boolean isDeleted = false;
 
+    @GenericField
+    public Boolean getIsDeletedForIndex() {
+        return isDeleted != null ? isDeleted : false;
+    }
+
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "current_version_id")
     private DocumentVersion currentVersion;
@@ -85,6 +96,12 @@ public class Document {
     protected void onCreate() {
         createdAt = LocalDateTime.now();
         updatedAt = LocalDateTime.now();
+        if (isDeleted == null) {
+            isDeleted = false;
+        }
+        if (version == null) {
+            version = 1;
+        }
     }
 
     @PreUpdate

@@ -30,6 +30,7 @@ public class DocumentService {
     private final SpaceMemberRepository spaceMemberRepository;
     private final TagRepository tagRepository;
     private final DocumentStateManager documentStateManager;
+    private final SearchService searchService;
 
     @Transactional
     public Document createDocument(DocumentDTO.CreateRequest request, UserPrincipal currentUser) {
@@ -59,7 +60,10 @@ public class DocumentService {
         document.setCurrentVersion(version);
         document.setVersion(version.getVersion());
 
-        return documentRepository.save(document);
+        Document savedDoc = documentRepository.save(document);
+        
+        log.info("Document {} created, index will be updated by listener", savedDoc.getId());
+        return savedDoc;
     }
 
     @Transactional
@@ -90,7 +94,10 @@ public class DocumentService {
         document.setCurrentVersion(version);
         document.setVersion(version.getVersion());
 
-        return documentRepository.save(document);
+        Document savedDoc = documentRepository.save(document);
+        
+        log.info("Document {} updated, index will be updated by listener", documentId);
+        return savedDoc;
     }
 
     @Transactional
@@ -128,7 +135,9 @@ public class DocumentService {
             document.setVersion(version.getVersion());
         }
 
-        return documentRepository.save(document);
+        Document savedDoc = documentRepository.save(document);
+        log.info("Document {} draft restored, index will be updated by listener", documentId);
+        return savedDoc;
     }
 
     @Transactional
@@ -145,6 +154,8 @@ public class DocumentService {
         document.setDeletedBy(currentUser.getUser());
 
         documentRepository.save(document);
+        
+        log.info("Document {} moved to trash, index will be updated by listener", documentId);
     }
 
     @Transactional
@@ -161,6 +172,8 @@ public class DocumentService {
         document.setDeletedBy(null);
 
         documentRepository.save(document);
+        
+        log.info("Document {} restored from trash, index will be updated by listener", documentId);
     }
 
     @Transactional
@@ -173,6 +186,8 @@ public class DocumentService {
         }
 
         documentRepository.delete(document);
+        
+        log.info("Document {} permanently deleted, index will be updated by listener", documentId);
     }
 
     @Transactional
@@ -196,7 +211,11 @@ public class DocumentService {
         document.setCurrentVersion(newVersion);
         document.setVersion(newVersion.getVersion());
 
-        return documentRepository.save(document);
+        Document savedDoc = documentRepository.save(document);
+        
+        log.info("Document {} rolled back to version {}, index will be updated by listener", 
+            documentId, targetVersion);
+        return savedDoc;
     }
 
     @Transactional
@@ -247,7 +266,21 @@ public class DocumentService {
         return documentRepository.findBySpaceAndIsDeletedTrueOrderByDeletedAtDesc(space);
     }
 
+    @Transactional(readOnly = true)
     public List<Document> searchDocuments(Space space, String keyword) {
+        if (searchService.isIndexAvailable()) {
+            log.debug("Using Hibernate Search for keyword: '{}' in space: {}", keyword, space.getId());
+            List<Document> results = searchService.searchByKeyword(space, keyword);
+            
+            if (!results.isEmpty()) {
+                log.debug("Hibernate Search returned {} results for '{}'", results.size(), keyword);
+                return results;
+            }
+            
+            log.debug("Hibernate Search returned empty results, falling back to JPA query");
+        }
+
+        log.debug("Using JPA fallback search for keyword: '{}' in space: {}", keyword, space.getId());
         return documentRepository.searchByKeyword(space, keyword);
     }
 
@@ -356,7 +389,7 @@ public class DocumentService {
             
             documentRepository.save(document);
             
-            log.info("Document {} updated from version {} to {} via OT", 
+            log.info("Document {} updated from version {} to {} via OT, index will be updated", 
                 documentId, currentVersion, newVersion);
         }
 
